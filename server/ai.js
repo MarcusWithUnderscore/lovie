@@ -84,32 +84,38 @@ const fullDate = `Today is ${weekday}, ${month} ${day}${daySuffix(day)}, ${toWor
 // Gemini Function Declaration for Avatar Emotions
 const setAvatarEmotionDeclaration = {
     name: "set_avatar_emotion",
-    description: "Sets the facial expression and body language for the AI avatar to match the emotional tone and content of your response. ALWAYS call this function after generating your response text to ensure the avatar displays appropriate non-verbal communication.",
+    description: "Sets the facial expression and body language for the AI avatar. YOU MUST ALWAYS call this function for EVERY response to ensure proper avatar animation.",
     parameters: {
         type: "object",
         properties: {
             emotion: {
                 type: "string",
                 enum: ["smile", "sad", "angry", "surprised", "funnyFace", "default"],
-                description: "Primary facial expression: 'smile' for positive/happy/helpful responses, 'sad' for apologies/unfortunate news/empathy, 'angry' for frustrated/negative content, 'surprised' for shocking/amazing/exciting news, 'funnyFace' for jokes and humor, 'default' for neutral"
+                description: "Primary facial expression based on content tone"
             },
             bodyLanguageCues: {
                 type: "array",
                 items: {
                     type: "string",
-                    enum: ["headTilt", "headNod", "shrug", "wink", "talking_0","talking_1","talking_2"]
+                    enum: ["headTilt", "headNod", "shrug", "wink", "talking_0", "talking_1", "talking_2"]
                 },
-                description: "Body language gestures: 'headTilt' for questions or curiosity, 'headNod' for agreement or affirmation, 'shrug' for uncertainty or 'I don't know', 'wink' for playful or friendly moments, talking_0 1 or 2 at random everytime you are communicating"
+                description: `Body language gestures to accompany the response. REQUIRED:
+                - ALWAYS include at least one talking cue (talking_0, talking_1, or talking_2) for every response
+                - headTilt: Use for questions, curiosity, or thoughtful moments
+                - headNod: Use for affirmations, agreements, or confirmations  
+                - shrug: Use for uncertainty, "I don't know", or casual dismissal
+                - wink: Use for playful, friendly, or humorous moments
+                - talking_0/1/2: REQUIRED for all spoken responses, vary randomly for natural movement`,
+                minItems: 1
             },
             reasoning: {
                 type: "string",
-                description: "Brief explanation of why you chose this emotion and body language"
+                description: "Brief explanation of chosen emotion and body language"
             }
         },
         required: ["emotion", "bodyLanguageCues", "reasoning"]
     }
 };
-
 // Utility Functions
 async function saveChatHistory(chatId, You, Cortex, userId) {
     try {
@@ -266,7 +272,6 @@ router.post("/cortex", validateChatInput, async (req, res) => {
     
     try {
         const { message: You, sender, chatId } = req.body;
-
         const chatHistory = await getChatHistory(chatId) || [];
 
         const messageContext = chatHistory.length > 0
@@ -285,7 +290,6 @@ router.post("/cortex", validateChatInput, async (req, res) => {
                 console.log(`Chat history deleted for ${sender}`);
             } catch (err) {
                 console.error(`Failed to delete chat history for ${sender}:`, err.message);
-                // Continue execution even if deletion fails
             }
         }
 
@@ -293,7 +297,6 @@ router.post("/cortex", validateChatInput, async (req, res) => {
         const dataset = await fs.promises.readFile(filePath, 'utf8');
         const model = "gemini-2.5-flash";
 
-        // Step 1: Call Gemini with function declaration
         console.log('Sending request to Gemini with function calling...');
         const response = await axios.post(
             `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
@@ -305,7 +308,24 @@ router.post("/cortex", validateChatInput, async (req, res) => {
 * Current time: ${timePhrase}, Date: ${fullDate}. You are talking to ${sender}
 * Don't mention the user, date and time unless necessary
 * Keep responses concise and natural for voice output
-* CRITICAL: After generating your response text, you MUST call the set_avatar_emotion function to set the avatar's facial expression and body language based on your response content and tone
+
+🎭 CRITICAL AVATAR ANIMATION INSTRUCTIONS:
+You MUST call the set_avatar_emotion function for EVERY response with:
+1. An appropriate emotion based on your response content
+2. Body language cues that match the context:
+   - ALWAYS include a talking cue (talking_0, talking_1, or talking_2) - this is MANDATORY
+   - Add headNod for confirmations/agreements (e.g., "yes", "exactly", "that's right")
+   - Add headTilt for questions or expressing curiosity
+   - Add shrug for uncertainty or casual dismissal
+   - Add wink for playful/friendly moments (use sparingly)
+3. Think about what gestures would naturally accompany your words
+
+Examples:
+- Answering a question: ["talking_1", "headNod"]
+- Asking a question back: ["talking_2", "headTilt"]
+- Expressing uncertainty: ["talking_0", "shrug"]
+- Being playful: ["talking_1", "wink"]
+- Simple statement: ["talking_2"]
 
 Chat history:
 ${messageContext}
@@ -319,7 +339,7 @@ Cortex:`
                 }],
                 tool_config: {
                     function_calling_config: {
-                        mode: "AUTO"
+                        mode: "AUTO" // Changed from ANY to ensure function is always called
                     }
                 }
             },
@@ -334,27 +354,35 @@ Cortex:`
 
         let aiResponse = "";
         let detectedEmotion = "smile";
-        let bodyLanguageCues = ["talking_1"];
+        let bodyLanguageCues = ["talking_1"]; // Default talking cue
         let emotionReasoning = "Default response";
 
         const candidate = response.data?.candidates?.[0];
         
-        // Step 2: Extract text and function call from response
         if (candidate?.content?.parts) {
             for (const part of candidate.content.parts) {
-                // Extract text response
                 if (part.text) {
                     aiResponse += part.text;
                 }
                 
-                // Extract function call
                 if (part.functionCall && part.functionCall.name === "set_avatar_emotion") {
                     const args = part.functionCall.args;
                     detectedEmotion = args.emotion || "smile";
                     bodyLanguageCues = args.bodyLanguageCues || ["talking_1"];
                     emotionReasoning = args.reasoning || "";
                     
-                    console.log('Gemini Function Call Received:');
+                    // Ensure at least one talking cue is present
+                    const hasTalkingCue = bodyLanguageCues.some(cue => 
+                        cue === 'talking_0' || cue === 'talking_1' || cue === 'talking_2'
+                    );
+                    
+                    if (!hasTalkingCue) {
+                        const randomTalking = ['talking_0', 'talking_1', 'talking_2'][Math.floor(Math.random() * 3)];
+                        bodyLanguageCues.push(randomTalking);
+                        console.log('⚠️ Added missing talking cue:', randomTalking);
+                    }
+                    
+                    console.log('🎭 Gemini Function Call Received:');
                     console.log('  Emotion:', detectedEmotion);
                     console.log('  Body Language:', bodyLanguageCues);
                     console.log('  Reasoning:', emotionReasoning);
@@ -362,14 +390,13 @@ Cortex:`
             }
         }
 
-        // Fallback if no response
         if (!aiResponse) {
             aiResponse = candidate?.content?.parts?.[0]?.text || "I'm here to help!";
         }
 
         console.log('AI Response:', aiResponse.substring(0, 100) + '...');
         
-        // Step 3: Generate audio using Edge TTS
+        // TTS generation code (same as before)
         let audioBase64 = null;
         
         try {
@@ -397,9 +424,7 @@ Cortex:`
             }
         } catch (audioError) {
             console.error('TTS Error:', audioError.message);
-            // Continue without audio
         } finally {
-            // Clean up temp file
             if (tempAudioPath && fs.existsSync(tempAudioPath)) {
                 try {
                     fs.unlinkSync(tempAudioPath);
@@ -409,15 +434,13 @@ Cortex:`
             }
         }
 
-        // Save to database
         try {
             await saveChatHistory(chatId, You, aiResponse, sender);
         } catch (dbError) {
             console.error('Failed to save chat history:', dbError.message);
-            // Continue - don't fail the request
         }
 
-        // Step 4: Send response with emotion data
+        // Send comprehensive response
         res.json({ 
             response: aiResponse,
             audioBase64: audioBase64,
@@ -430,7 +453,6 @@ Cortex:`
     } catch (error) {
         console.error("Error in /cortex route:", error.message);
         
-        // Clean up temp file on error
         if (tempAudioPath && fs.existsSync(tempAudioPath)) {
             try {
                 fs.unlinkSync(tempAudioPath);
@@ -443,7 +465,7 @@ Cortex:`
             response: "I'm currently unavailable. Please try again later.",
             audioBase64: null,
             emotion: "sad",
-            bodyLanguage: [],
+            bodyLanguage: ["talking_1"],
             emotionReasoning: "Service error",
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
