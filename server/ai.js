@@ -75,9 +75,9 @@ const setAvatarEmotionDeclaration = {
                 type: "array",
                 items: {
                     type: "string",
-                    enum: ["headTilt", "headNod", "shrug", "wink", "talking_0","talking_1","talking_2"]
+                    enum: ["headTilt", "headNod", "shrug", "wink"]
                 },
-                description: "Body language gestures: 'headTilt' for questions or curiosity, 'headNod' for agreement or affirmation, 'shrug' for uncertainty or 'I don't know', 'wink' for playful or friendly moments, talking_0 1 or 2 at random everytime you are communicating"
+                description: "Body language gestures: 'headTilt' for questions or curiosity, 'headNod' for agreement or affirmation, 'shrug' for uncertainty or 'I don't know', 'wink' for playful or friendly moments"
             },
             reasoning: {
                 type: "string",
