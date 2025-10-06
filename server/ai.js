@@ -19,13 +19,18 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Constants
+const MAX_MESSAGE_LENGTH = 5000;
+const AUDIO_WRITE_DELAY = 500; // Increased for reliability
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'];
+
 router.use(cors({
-    origin: '*',
+    origin: ALLOWED_ORIGINS,
     methods: ['GET', 'POST', 'DELETE'],
     credentials: true
 }));
 
-// Date & Time Calculation
+// Date & Time Calculation - FIXED
 const now = DateTime.now().setZone('Africa/Nairobi');
 const weekday = now.weekdayLong;
 const month = now.monthLong;
@@ -34,26 +39,43 @@ const year = now.year;
 
 let hour = now.hour;
 const minute = now.minute;
-const isPM = hour >= 12;
-const period = isPM ? 'in the evening' : 'in the morning';
-hour = hour % 12 || 12;
 
+// Fixed: Proper period determination
+let period;
+if (hour >= 0 && hour < 12) {
+    period = 'in the morning';
+} else if (hour >= 12 && hour < 17) {
+    period = 'in the afternoon';
+} else {
+    period = 'in the evening';
+}
+
+const displayHour = hour % 12 || 12;
+
+// Fixed: More natural time phrasing
 let timePhrase = '';
 if (minute === 0) {
-    timePhrase = `It's ${toWords(hour)} o'clock ${period}.`;
+    timePhrase = `It's ${toWords(displayHour)} o'clock ${period}.`;
 } else if (minute === 15) {
-    timePhrase = `It's quarter past ${toWords(hour)} ${period}.`;
+    timePhrase = `It's quarter past ${toWords(displayHour)} ${period}.`;
 } else if (minute === 30) {
-    timePhrase = `It's half past ${toWords(hour)} ${period}.`;
+    timePhrase = `It's half past ${toWords(displayHour)} ${period}.`;
 } else if (minute === 45) {
-    const nextHour = (hour % 12) + 1;
-    timePhrase = `It's quarter to ${toWords(nextHour)} ${period}.`;
+    // Fixed: Handle period change when going to next hour
+    let nextHour = displayHour === 12 ? 1 : displayHour + 1;
+    let nextPeriod = period;
+    if (hour === 11) nextPeriod = 'in the afternoon';
+    if (hour === 23) nextPeriod = 'in the morning';
+    timePhrase = `It's quarter to ${toWords(nextHour)} ${nextPeriod}.`;
 } else if (minute < 30) {
-    timePhrase = `It's ${toWords(minute)} past ${toWords(hour)} ${period}.`;
+    timePhrase = `It's ${toWords(minute)} minutes past ${toWords(displayHour)} ${period}.`;
 } else {
     const minutesTo = 60 - minute;
-    const nextHour = (hour % 12) + 1;
-    timePhrase = `It's ${toWords(minutesTo)} to ${toWords(nextHour)} ${period}.`;
+    let nextHour = displayHour === 12 ? 1 : displayHour + 1;
+    let nextPeriod = period;
+    if (hour === 11) nextPeriod = 'in the afternoon';
+    if (hour === 23) nextPeriod = 'in the morning';
+    timePhrase = `It's ${toWords(minutesTo)} minutes to ${toWords(nextHour)} ${nextPeriod}.`;
 }
 
 const daySuffix = (n) => ['th', 'st', 'nd', 'rd'][(n % 100 >> 3 ^ 1 && n % 10) || 0] || 'th';
@@ -107,6 +129,7 @@ async function saveChatHistory(chatId, You, Cortex, userId) {
         }
     } catch (err) {
         console.error("Error saving chat:", err);
+        throw err; // Re-throw to handle upstream
     }
 }
 
@@ -142,26 +165,55 @@ async function textToSpeechEdgeTTS(text, outputPath) {
         });
         
         await tts.ttsPromise(cleanText, outputPath);
-        await new Promise(resolve => setTimeout(resolve, 100));
         
-        if (fs.existsSync(outputPath)) {
-            const stats = fs.statSync(outputPath);
-            console.log('Audio created, Size:', stats.size, 'bytes');
-            
-            if (stats.size === 0) {
-                console.error('Audio file is empty');
-                return null;
+        // Increased delay and added verification loop
+        await new Promise(resolve => setTimeout(resolve, AUDIO_WRITE_DELAY));
+        
+        // Wait for file to be ready with retries
+        let attempts = 0;
+        while (attempts < 5) {
+            if (fs.existsSync(outputPath)) {
+                const stats = fs.statSync(outputPath);
+                if (stats.size > 0) {
+                    console.log('Audio created, Size:', stats.size, 'bytes');
+                    return outputPath;
+                }
             }
-            
-            return outputPath;
-        } else {
-            console.error('Audio file not created');
-            return null;
+            await new Promise(resolve => setTimeout(resolve, 100));
+            attempts++;
         }
+        
+        console.error('Audio file not ready after retries');
+        return null;
     } catch (error) {
         console.error("TTS Error:", error.message);
         return null;
     }
+}
+
+// Input validation middleware
+function validateChatInput(req, res, next) {
+    const { message, sender, chatId } = req.body;
+    
+    if (!message || !sender) {
+        return res.status(400).json({ 
+            error: "Invalid request. 'message' and 'sender' are required." 
+        });
+    }
+    
+    if (message.length > MAX_MESSAGE_LENGTH) {
+        return res.status(400).json({ 
+            error: `Message too long. Maximum ${MAX_MESSAGE_LENGTH} characters.` 
+        });
+    }
+    
+    if (chatId && typeof chatId !== 'string') {
+        return res.status(400).json({ 
+            error: "Invalid chatId format." 
+        });
+    }
+    
+    next();
 }
 
 // Admin Routes
@@ -209,15 +261,11 @@ router.post('/chat/history', async (req, res) => {
 });
 
 // Main AI Chat Route with Gemini Function Calling
-router.post("/cortex", async (req, res) => {
+router.post("/cortex", validateChatInput, async (req, res) => {
+    let tempAudioPath = null;
+    
     try {
         const { message: You, sender, chatId } = req.body;
-
-        if (!You || !sender) {
-            return res.status(400).json({ 
-                response: "Invalid request. 'message' and 'sender' are required." 
-            });
-        }
 
         const chatHistory = await getChatHistory(chatId) || [];
 
@@ -234,8 +282,10 @@ router.post("/cortex", async (req, res) => {
         if (You.toLowerCase().includes('/start')) {
             try {
                 await Chat.findOneAndDelete({ chatId });
+                console.log(`Chat history deleted for ${sender}`);
             } catch (err) {
                 console.error(`Failed to delete chat history for ${sender}:`, err.message);
+                // Continue execution even if deletion fails
             }
         }
 
@@ -277,14 +327,15 @@ Cortex:`
                 headers: {
                     "Content-Type": "application/json",
                     "x-goog-api-key": process.env.GEMINI_API_KEY
-                }
+                },
+                timeout: 30000
             }
         );
 
         let aiResponse = "";
         let detectedEmotion = "smile";
-        let bodyLanguageCues = [];
-        let emotionReasoning = "";
+        let bodyLanguageCues = ["talking_1"];
+        let emotionReasoning = "Default response";
 
         const candidate = response.data?.candidates?.[0];
         
@@ -300,7 +351,7 @@ Cortex:`
                 if (part.functionCall && part.functionCall.name === "set_avatar_emotion") {
                     const args = part.functionCall.args;
                     detectedEmotion = args.emotion || "smile";
-                    bodyLanguageCues = args.bodyLanguageCues || [];
+                    bodyLanguageCues = args.bodyLanguageCues || ["talking_1"];
                     emotionReasoning = args.reasoning || "";
                     
                     console.log('Gemini Function Call Received:');
@@ -311,7 +362,7 @@ Cortex:`
             }
         }
 
-        // Fallback if no function call was made
+        // Fallback if no response
         if (!aiResponse) {
             aiResponse = candidate?.content?.parts?.[0]?.text || "I'm here to help!";
         }
@@ -324,14 +375,15 @@ Cortex:`
         try {
             const cleanText = stripHtmlAndSpecialChars(aiResponse);
             if (cleanText) {
-                const tempPath = path.join(__dirname, './temp', `audio_${Date.now()}.mp3`);
                 const tempDir = path.join(__dirname, './temp');
                 
                 if (!fs.existsSync(tempDir)) {
                     fs.mkdirSync(tempDir, { recursive: true });
                 }
                 
-                const audioFile = await textToSpeechEdgeTTS(cleanText, tempPath);
+                tempAudioPath = path.join(tempDir, `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.mp3`);
+                
+                const audioFile = await textToSpeechEdgeTTS(cleanText, tempAudioPath);
                 
                 if (audioFile && fs.existsSync(audioFile)) {
                     const stats = fs.statSync(audioFile);
@@ -341,21 +393,33 @@ Cortex:`
                         audioBase64 = audioBuffer.toString('base64');
                         console.log('Audio base64 created, length:', audioBase64.length);
                     }
-                    
-                    fs.unlinkSync(audioFile);
                 }
             }
         } catch (audioError) {
             console.error('TTS Error:', audioError.message);
+            // Continue without audio
+        } finally {
+            // Clean up temp file
+            if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+                try {
+                    fs.unlinkSync(tempAudioPath);
+                } catch (cleanupError) {
+                    console.error('Failed to cleanup temp audio file:', cleanupError.message);
+                }
+            }
         }
 
         // Save to database
-        await saveChatHistory(chatId, You, aiResponse, sender);
+        try {
+            await saveChatHistory(chatId, You, aiResponse, sender);
+        } catch (dbError) {
+            console.error('Failed to save chat history:', dbError.message);
+            // Continue - don't fail the request
+        }
 
         // Step 4: Send response with emotion data
         res.json({ 
             response: aiResponse,
-            text: aiResponse,
             audioBase64: audioBase64,
             emotion: detectedEmotion,
             bodyLanguage: bodyLanguageCues,
@@ -364,14 +428,24 @@ Cortex:`
         });
 
     } catch (error) {
-        console.error("Error in /cortex route:", error.response?.data || error.message);
+        console.error("Error in /cortex route:", error.message);
+        
+        // Clean up temp file on error
+        if (tempAudioPath && fs.existsSync(tempAudioPath)) {
+            try {
+                fs.unlinkSync(tempAudioPath);
+            } catch (e) {
+                console.error('Cleanup failed:', e.message);
+            }
+        }
+        
         res.status(500).json({ 
             response: "I'm currently unavailable. Please try again later.",
-            text: "I'm currently unavailable. Please try again later.",
             audioBase64: null,
             emotion: "sad",
             bodyLanguage: [],
-            emotionReasoning: "Error occurred"
+            emotionReasoning: "Service error",
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     }
 });
